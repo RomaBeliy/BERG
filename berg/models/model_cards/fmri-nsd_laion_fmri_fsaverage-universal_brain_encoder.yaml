@@ -1,0 +1,185 @@
+model_id: fmri-nsd_laion_fmri_fsaverage-universal_brain_encoder
+modality: fMRI
+training_dataset: Natural Scenes Dataset (NSD) + LAION-fMRI (fsaverage surface space)
+species: Human
+stimuli: Images
+model_type: DINOv2 ViT-L/14 (LoRA-inspired adaptation) + learned voxel embeddings
+creator: Roman Beliy, Navve Wasserman, Amit Zalcher, Michal Irani
+
+description: |
+  The Universal Brain-Encoder is a single image-to-fMRI encoder trained jointly on multiple subjects and
+  multiple fMRI datasets. This model is trained jointly on the Natural Scenes Dataset (NSD, 8 subjects) and
+  LAION-fMRI (5 subjects): one multi-subject, multi-dataset model predicts the fMRI responses of all 13
+  subjects. The approach does not require subjects to view the same images, nor to be scanned on the same
+  machine.
+
+  The encoder is voxel-centric: it predicts the response of each brain-voxel on every image by computing
+  the cross-attention between a learned brain-voxel embedding and multi-level deep image features. Each
+  brain-voxel of each subject is assigned a unique "voxel-embedding", initialized randomly and optimized
+  during training to predict the fMRI response of that brain-voxel on any image. Other than these
+  voxel-specific embeddings, all network weights are shared across all voxels of all subjects, so the
+  encoder is indifferent to the number of voxels per fMRI scan. Once trained, transfer learning to a new
+  subject or a new fMRI dataset requires only few new training examples: only the new voxel-embeddings are
+  optimized, with all other weights frozen (code: https://github.com/WeizmannVision/universal-brain-encoder-code).
+
+  Architecture: image features are extracted from 5 intermediate layers (1, 6, 12, 18, 24) of a DINOv2
+  ViT-L/14 backbone, adapted with a LoRA-inspired approach. A cross-attention block (spatial attention, a
+  separate MLP for each feature layer, and functional attention) combines the voxel-embedding with these
+  features and outputs a single scalar: the predicted fMRI response of that voxel to the image.
+
+  NSD responses are "betas_fithrf_GLMdenoise_RR" betas in fsaverage space, restricted to the Algonauts
+  2023 challenge vertices (left hemisphere, then right hemisphere), z-scored per voxel within each session.
+
+  LAION-fMRI responses are GLMsingle (v1.2) single-trial betas of type TYPED ("FITHRF_GLMDENOISE_RR", the
+  same type as NSD), fitted on tedana optimally-combined BOLD from a 3-echo 7T acquisition in native T1w
+  space (1.778 mm). They were sampled through each subject's cortical ribbon and resampled to the fsaverage7
+  surface, restricted to each subject's visual-cortex mask (35,842 to 41,892 vertices per subject; left
+  hemisphere, then right hemisphere), z-scored per voxel within each session, and averaged over all
+  repetitions of each image. Training used the train part of the official LAION-fMRI "tau" split; the
+  "tau" test images and the out-of-distribution ("ood" split) images were held out.
+
+input:
+  description: "A batch of RGB images."
+  type: "numpy.ndarray"
+  shape: [batch_size, 3, height, width]
+  constraints:
+    - "Image values should be integers in range [0, 255]."
+    - "Images are center-cropped to a square, then resized to 224×224."
+
+output:
+  description: |
+    Nested dictionary organized by dataset and subject, e.g.
+      {"NSD": {"sub-01": array, "sub-02": array}, "LAION": {"sub-01": array}}
+    where each array has shape [batch_size, n_voxels].
+  type: "dict"
+  shape: "{dataset: {subject: [batch_size, n_voxels]}}"
+  dimensions:
+    - name: "batch_size"
+      description: "Number of stimuli in the batch."
+    - name: "n_voxels"
+      description: "Number of selected voxels of that subject (all voxels if no ROI is selected)."
+
+metadata: |
+  Spatial information for each subject's output voxels: position, hemisphere and fsaverage7 vertex.
+  {dataset: {subject: {...}}}, per subject:
+      num_voxels     : int            - Total number of voxels of the subject
+      voxel_indices  : (n_voxels,)    - Subject voxel index of each output column
+      coords         : (n_voxels, 3)  - fsaverage7 pial surface coordinates (mm) of each output voxel
+      hemis          : (n_voxels,)    - True for left hemisphere, False for right
+      vertex_inds    : (n_voxels,)    - fsaverage7 vertex index of each output voxel (in its hemisphere)
+  With a loaded model (encode with return_metadata=True), the arrays follow the selected voxels;
+  without one (get_model_metadata), they cover all voxels.
+  Read from one metadata file per dataset (metadata/metadata_nsd.npy, metadata/metadata_laion.npy).
+
+parameters:
+
+  model_id:
+    description: Unique identifier of the model to load.
+    required: true
+    type: "str"
+    valid_values: "fmri-nsd_laion_fmri_fsaverage-universal_brain_encoder"
+    example: "fmri-nsd_laion_fmri_fsaverage-universal_brain_encoder"
+    function: "get_encoding_model, get_model_metadata"
+
+  subject:
+    description: Subject ID in the format DATASET-## (e.g. "NSD-01"), or a list of them.
+    required: true
+    type: "str or list[str]"
+    valid_values: ["NSD-01", "NSD-02", "NSD-03", "NSD-04", "NSD-05", "NSD-06", "NSD-07", "NSD-08",
+                   "LAION-01", "LAION-03", "LAION-05", "LAION-06", "LAION-07"]
+    example: "NSD-01"
+    function: "get_encoding_model, get_model_metadata"
+
+  selection:
+    description: Which voxels to return. If not provided, all voxels of each subject are returned.
+    required: false
+    type: dict
+    function: "get_encoding_model"
+    properties:
+      roi:
+        type: "str or list[str]"
+        description: |
+          Which ROIs or ROI groups to return. ROIs can overlap; if several are given, every voxel in any
+          of them is returned once. Names are not case sensitive.
+          Groups: retinotopic, faces, bodies, places, words, and for LAION-fMRI also objects and motion.
+          ROIs: the NSD visual ROIs listed below; LAION-fMRI subjects also have LAION-only ROIs (e.g. MT, MST).
+          Other accepted names:
+            - without the number: "FFA" = FFA-1 + FFA-2; V1-V4 without d/v: "V1" = V1d + V1v
+            - without the hyphen: "FFA1"
+            - with a group prefix: "faces_FFA-1"
+            - group aliases: "visual" and "prf-visualrois" = retinotopic, "fplaces" = places,
+              "floc-faces" = faces (same for bodies, places, words)
+        valid_values: [
+          # groups
+          "retinotopic", "faces", "bodies", "places", "words", "objects", "motion",
+          # ROIs
+          "V1v", "V1d", "V2v", "V2d", "V3v", "V3d", "hV4",
+          "OFA", "FFA-1", "FFA-2",
+          "EBA", "FBA-1", "FBA-2", "mTL-bodies",
+          "OPA", "PPA", "RSC",
+          "OWFA", "VWFA-1", "VWFA-2", "mfs-words", "mTL-words",
+          "early", "midventral", "midlateral", "midparietal", "ventral", "lateral", "parietal",
+          "MT", "MST",
+          # without the number, V1-V4 without d/v
+          "FFA", "FBA", "VWFA", "V1", "V2", "V3", "V4",
+          # without the hyphen
+          "FFA1", "FFA2", "FBA1", "FBA2", "VWFA1", "VWFA2", "mTLbodies", "mfswords", "mTLwords",
+          # with a group prefix
+          "visual_V1d", "visual_V1v", "visual_V2d", "visual_V2v", "visual_V3d", "visual_V3v", "visual_hV4",
+          "faces_FFA-1", "faces_FFA-2", "faces_OFA",
+          "bodies_EBA", "bodies_FBA-1", "bodies_FBA-2", "bodies_mTL-bodies",
+          "fplaces_OPA", "fplaces_PPA", "fplaces_RSC",
+          "words_OWFA", "words_VWFA-1", "words_VWFA-2", "words_mTL-words", "words_mfs-words",
+          "streams_early", "streams_lateral", "streams_midlateral", "streams_midparietal",
+          "streams_midventral", "streams_parietal", "streams_ventral",
+          # group aliases
+          "visual", "prf-visualrois", "fplaces", "floc-faces", "floc-bodies", "floc-places", "floc-words"]
+        example: "FFA"
+      hemisphere:
+        type: str
+        description: Hemisphere of the returned voxels. Can be used with or without "roi".
+        valid_values: ["both", "lh", "rh"]
+        example: "lh"
+
+  device:
+    description: "Device to run the model on. 'auto' will use CUDA if available, otherwise CPU."
+    required: false
+    type: str
+    valid_values: ["cpu", "cuda", "auto"]
+    default: "auto"
+    example: "auto"
+    function: "get_encoding_model"
+
+  model:
+    description: An instantiated and loaded encoding model.
+    required: true
+    type: BaseModelInterface
+    function: "encode"
+
+  stimulus:
+    description: "A batch of RGB images with integer values in [0, 255] (unsigned uint8)."
+    required: true
+    type: numpy.ndarray
+    shape: [batch_size, 3, height, width]
+    example: "An array of shape [100, 3, 224, 224] representing 100 RGB images."
+    function: "encode"
+
+  batch_size:
+    description: "Number of images per forward pass. Lower it if you run out of GPU memory."
+    required: false
+    type: int
+    default: 8
+    example: 8
+    function: "encode"
+
+  return_metadata:
+    description: "Whether to return the model's metadata together with the responses."
+    required: false
+    type: bool
+    default: false
+    example: true
+    function: "encode"
+
+references:
+  - "Beliy R*, Wasserman N*, Zalcher A, Irani M. The Wisdom of a Crowd of Brains: A Universal Brain Encoder. Conference on Cognitive Computational Neuroscience (CCN), 2026, Proceedings track. arXiv:2406.12179. https://arxiv.org/abs/2406.12179"
+  - "Code: https://github.com/WeizmannVision/universal-brain-encoder-code"

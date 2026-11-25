@@ -10,6 +10,7 @@ for _model in (
     "berg.models.fmri.nsd_fsaverage_huze",
     "berg.models.fmri.nsd_fsaverage_vit_b_32",
     "berg.models.fmri.nsd_fwrf",
+    "berg.models.fmri.universal_brain_encoder",
     "berg.models.fmri.things_fmri_1_vit_b_32",
     "berg.models.fmri.tuckute_2024_gpt2_xl",
     "berg.models.fmri.cneuromod_algo2025_text2fmri",
